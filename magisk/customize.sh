@@ -24,3 +24,5 @@ else
 fi
 
 ui_print "  by j-hc (github.com/j-hc)"
+
+ui_print "  Thanks from ReVanced | MMT"
