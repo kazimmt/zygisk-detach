@@ -6,11 +6,11 @@ Detaches installed apps from Play Store against its aggressive updating policy w
 Hooks libbinder with zygisk instead of applying SQL queries to database files
 
 ### Usage
-* Enable zygisk in magisk or ZygiskOnKernelSU module if you are using KernelSU
+* Enable **zygisk** in magisk or [ZygiskOnKernelSU](https://github.com/Dr-TSNG/ZygiskOnKernelSU/releases/tag/v4-0.7.1) module if you are using **KernelSU**
 * Flash zygisk-detach module
 * Reboot
 * Run helper cli in termux:  
-	`$ detach` or `$ su -c detach`
+  `$ detach` or `$ su -c detach`
 * Select apps you wish to detach. Changes are applied immediately, no need to reboot.
 
 ### Notes
