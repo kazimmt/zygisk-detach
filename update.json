@@ -2,5 +2,5 @@
 	"version": "v1.8",
 	"versionCode": 9,
 	"zipUrl": "https://github.com/j-hc/zygisk-detach/releases/latest/download/zygisk-detach-v1.8.zip",
-	"changelog": "https://raw.githubusercontent.com/kazimmt/zygisk-detach/master/README.md"
+	"changelog": "https://raw.githubusercontent.com/j-hc/zygisk-detach/master/README.md"
 }

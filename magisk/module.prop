@@ -4,4 +4,4 @@ version=v1.8
 versionCode=9
 author=j-hc
 description=Detaches installed apps from Play Store
-updateJson=https://raw.githubusercontent.com/kazimmt/zygisk-detach/master/update.json
+updateJson=https://raw.githubusercontent.com/j-hc/zygisk-detach/master/update.json
