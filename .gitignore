@@ -1,3 +1,17 @@
+*.iml
+gen/
+bin/
+build/
+.gradle/
+.idea/
+user.gradle
+local.properties
+.directory
+
+.settings
+.classpath
+.project
+
 *.zip
 *.so
 b.sh
