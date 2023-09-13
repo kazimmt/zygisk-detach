@@ -14,7 +14,7 @@ local.properties
 
 *.zip
 *.so
-*.sh
+b.sh
 test*
 magisk/system/bin/*
 fast-memmem

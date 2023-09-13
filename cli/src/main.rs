@@ -1,12 +1,15 @@
 #![feature(iter_intersperse, print_internals)]
 
-use std::fmt::Display;
+use std::error::Error;
+use std::fmt::{Debug, Display};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Seek};
 use std::io::{BufWriter, Read, Write};
 use std::mem::size_of;
 use std::ops::Range;
+use std::panic::Location;
 use std::process::{Command, ExitCode};
+use termion::raw::IntoRawMode;
 
 use termion::event::Key;
 use termion::{clear, cursor};
@@ -15,7 +18,7 @@ mod colorize;
 use colorize::ToColored;
 
 mod menus;
-use menus::{cursor_hide, cursor_show, select_menu, select_menu_numbered, select_menu_with_input};
+use menus::Menus;
 
 #[cfg(target_os = "android")]
 const MODULE_DETACH: &str = "/data/adb/modules/zygisk-detach/detach.bin";
@@ -31,9 +34,35 @@ extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
+struct CLIErr<E: Error> {
+    source: E,
+    loc: &'static Location<'static>,
+}
+impl<E: Error> Error for CLIErr<E> {}
+impl<E: Error> Debug for CLIErr<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}\nat {}", self.source, self.loc)
+    }
+}
+impl<E: Error> Display for CLIErr<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
+}
+impl From<io::Error> for CLIErr<io::Error> {
+    #[track_caller]
+    fn from(err: io::Error) -> Self {
+        Self {
+            source: err,
+            loc: Location::caller(),
+        }
+    }
+}
+
+type IOError<T> = Result<T, CLIErr<io::Error>>;
+
 fn main() -> ExitCode {
     std::panic::set_hook(Box::new(|panic| {
-        use termion::raw::IntoRawMode;
         if let Ok(mut stderr) = io::stderr().into_raw_mode() {
             let _ = writeln!(stderr, "\r\n{panic}\r\n");
             let _ = writeln!(stderr, "This should not have happened.\r");
@@ -44,6 +73,7 @@ fn main() -> ExitCode {
             let _ = write!(stderr, "{}", cursor::Show);
         }
     }));
+    let mut menus = Menus::new();
 
     let mut args = std::env::args().skip(1);
     if matches!(args.next().as_deref(), Some("--serialize")) {
@@ -64,14 +94,14 @@ fn main() -> ExitCode {
         }
     }
 
-    let ret = match interactive() {
+    let ret = match interactive(&mut menus) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("\rERROR: {err}");
             ExitCode::FAILURE
         }
     };
-    cursor_show().unwrap();
+    menus.cursor_show().unwrap();
     ret
 }
 
@@ -80,7 +110,7 @@ fn detach_bin_changed() {
     let _ = kill_store();
 }
 
-fn serialize_txt(path: &str) -> io::Result<()> {
+fn serialize_txt(path: &str) -> IOError<()> {
     let detach_bin = OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -97,19 +127,19 @@ fn serialize_txt(path: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn interactive() -> io::Result<()> {
-    cursor_hide()?;
+fn interactive(menus: &mut Menus) -> IOError<()> {
+    menus.cursor_hide()?;
     print!("zygisk-detach cli by github.com/j-hc\r\n\n");
     loop {
-        match main_menu()? {
-            Op::DetachSelect => detach_menu()?,
-            Op::ReattachSelect => reattach_menu()?,
+        match main_menu(menus)? {
+            Op::DetachSelect => detach_menu(menus)?,
+            Op::ReattachSelect => reattach_menu(menus)?,
             Op::Reset => {
                 if fs::remove_file(MODULE_DETACH).is_ok() {
                     let _ = kill_store();
-                    text!("Reset");
+                    text!(menus, "Reset");
                 } else {
-                    text!("Already empty");
+                    text!(menus, "Already empty");
                 }
             }
             Op::CopyToSd => {
@@ -118,11 +148,11 @@ fn interactive() -> io::Result<()> {
                 #[cfg(target_os = "linux")]
                 const SDCARD_DETACH: &str = "detach_sdcard.bin";
                 match fs::copy(MODULE_DETACH, SDCARD_DETACH) {
-                    Ok(_) => text!("Copied"),
+                    Ok(_) => text!(menus, "Copied"),
                     Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                        text!("detach.bin not found");
+                        text!(menus, "detach.bin not found");
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => return Err(err.into()),
                 }
             }
             Op::Quit => return Ok(()),
@@ -131,26 +161,30 @@ fn interactive() -> io::Result<()> {
     }
 }
 
-fn reattach_menu() -> io::Result<()> {
-    let Ok(mut detach_txt) = fs::OpenOptions::new()
+fn reattach_menu(menus: &mut Menus) -> IOError<()> {
+    let mut detach_txt = match fs::OpenOptions::new()
         .write(true)
         .read(true)
         .open(MODULE_DETACH)
-    else {
-        text!("No detach.bin was found!");
-        return Ok(());
+    {
+        Ok(v) => v,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            text!(menus, "detach.bin not found");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
     };
     let mut content = Vec::new();
     detach_txt.read_to_end(&mut content)?;
     detach_txt.seek(io::SeekFrom::Start(0))?;
-    let detached_apps = get_detached_apps(&content);
+    let detached_apps = get_detached_apps(menus, &content);
     let detach_len = detached_apps.len();
     if detach_len == 0 {
-        text!("detach.bin is empty");
+        text!(menus, "detach.bin is empty");
         return Ok(());
     }
     let list = detached_apps.iter().map(|e| e.0.as_str());
-    let Some(i) = select_menu(
+    let Some(i) = menus.select_menu(
         list,
         "Select the app to re-attach ('q' to leave):",
         "✖".red(),
@@ -160,7 +194,7 @@ fn reattach_menu() -> io::Result<()> {
         return Ok(());
     };
 
-    textln!("{}: {}", "re-attach".red(), detached_apps[i].0);
+    textln!(menus, "{}: {}", "re-attach".red(), detached_apps[i].0);
     content.drain(detached_apps[i].1.clone());
     detach_txt.set_len(0)?;
     detach_txt.write_all(&content)?;
@@ -168,7 +202,7 @@ fn reattach_menu() -> io::Result<()> {
     Ok(())
 }
 
-fn get_detached_apps(detach_txt: &[u8]) -> Vec<(String, Range<usize>)> {
+fn get_detached_apps(menus: &mut Menus, detach_txt: &[u8]) -> Vec<(String, Range<usize>)> {
     let mut i = 0;
     let mut detached = Vec::new();
     while i < detach_txt.len() {
@@ -177,7 +211,7 @@ fn get_detached_apps(detach_txt: &[u8]) -> Vec<(String, Range<usize>)> {
         i += SZ_LEN;
         let Some(encoded_name) = &detach_txt.get(i..i + len as usize) else {
             eprintln!("Corrupted detach.bin. Reset and try again.");
-            let _ = cursor_show();
+            let _ = menus.cursor_show();
             std::process::exit(1);
         };
         let name = String::from_utf8(encoded_name.iter().step_by(2).cloned().collect()).unwrap();
@@ -188,12 +222,12 @@ fn get_detached_apps(detach_txt: &[u8]) -> Vec<(String, Range<usize>)> {
 }
 
 #[cfg(target_os = "linux")]
-fn get_installed_apps() -> io::Result<Vec<u8>> {
+fn get_installed_apps() -> IOError<Vec<u8>> {
     Ok("package:com.app1\npackage:org.xxx2".as_bytes().to_vec())
 }
 
 #[cfg(target_os = "android")]
-fn get_installed_apps() -> io::Result<Vec<u8>> {
+fn get_installed_apps() -> IOError<Vec<u8>> {
     Ok(Command::new("pm")
         .args(["list", "packages"])
         .stdout(std::process::Stdio::piped())
@@ -211,7 +245,7 @@ enum Op {
     Nop,
 }
 
-fn main_menu() -> io::Result<Op> {
+fn main_menu(menus: &mut Menus) -> IOError<Op> {
     struct OpText {
         desc: &'static str,
         op: Op,
@@ -232,16 +266,16 @@ fn main_menu() -> io::Result<Op> {
         OpText::new("Reset detached apps", Op::Reset),
         OpText::new("Copy detach.bin to /sdcard", Op::CopyToSd),
     ];
-    let i = select_menu_numbered(ops.iter(), Key::Char('q'), "- Selection:")?;
+    let i = menus.select_menu_numbered(ops.iter(), Key::Char('q'), "- Selection:")?;
     use menus::SelectNumberedResp as SN;
     match i {
         SN::Index(i) => Ok(ops[i].op),
         SN::UndefinedKey(Key::Char(c)) => {
-            text!("Undefined key {c:?}");
+            text!(menus, "Undefined key {c:?}");
             Ok(Op::Nop)
         }
         SN::UndefinedKey(k @ (Key::Down | Key::Up | Key::Left | Key::Right)) => {
-            text!("Undefined key {k:?}");
+            text!(menus, "Undefined key {k:?}");
             Ok(Op::Nop)
         }
         SN::Quit => Ok(Op::Quit),
@@ -249,7 +283,7 @@ fn main_menu() -> io::Result<Op> {
     }
 }
 
-fn bin_serialize(app: &str, sink: impl Write) -> io::Result<()> {
+fn bin_serialize(app: &str, sink: impl Write) -> IOError<()> {
     let w = app
         .as_bytes()
         .iter()
@@ -267,7 +301,7 @@ fn bin_serialize(app: &str, sink: impl Write) -> io::Result<()> {
     Ok(())
 }
 
-fn detach_menu() -> io::Result<()> {
+fn detach_menu(menus: &mut Menus) -> IOError<()> {
     let installed_apps = get_installed_apps()?;
     let apps: Vec<&str> = installed_apps[..installed_apps.len() - 1]
         .split(|&e| e == b'\n')
@@ -277,8 +311,8 @@ fn detach_menu() -> io::Result<()> {
         })
         .map(|e| std::str::from_utf8(e).expect("non utf-8 package names?"))
         .collect();
-    cursor_show()?;
-    let selected = select_menu_with_input(
+    menus.cursor_show()?;
+    let selected = menus.select_menu_with_input(
         |input| {
             let input = input.trim();
             if !input.is_empty() {
@@ -297,7 +331,7 @@ fn detach_menu() -> io::Result<()> {
         "- app: ",
         None,
     )?;
-    cursor_hide()?;
+    menus.cursor_hide()?;
     if let Some(detach_app) = selected {
         let mut f = fs::OpenOptions::new()
             .create(true)
@@ -306,19 +340,22 @@ fn detach_menu() -> io::Result<()> {
             .open(MODULE_DETACH)?;
         let mut buf: Vec<u8> = Vec::new();
         f.read_to_end(&mut buf)?;
-        if !get_detached_apps(&buf).iter().any(|(s, _)| s == detach_app) {
+        if !get_detached_apps(menus, &buf)
+            .iter()
+            .any(|(s, _)| s == detach_app)
+        {
             bin_serialize(detach_app, f)?;
-            textln!("{} {}", "detach:".green(), detach_app);
-            textln!("Changes are applied. No need for a reboot!");
+            textln!(menus, "{} {}", "detach:".green(), detach_app);
+            textln!(menus, "Changes are applied. No need for a reboot!");
             detach_bin_changed();
         } else {
-            textln!("{} {}", "already detached:".green(), detach_app);
+            textln!(menus, "{} {}", "already detached:".green(), detach_app);
         }
     }
     Ok(())
 }
 
-fn _kill_store_am() -> io::Result<()> {
+fn _kill_store_am() -> IOError<()> {
     Command::new("am")
         .args(["force-stop", "com.android.vending"])
         .spawn()?
@@ -326,7 +363,7 @@ fn _kill_store_am() -> io::Result<()> {
     Ok(())
 }
 
-fn kill_store() -> io::Result<()> {
+fn kill_store() -> IOError<()> {
     const PKG: &str = "com.android.vending";
     let mut buf = [0u8; PKG.len()];
     for proc in fs::read_dir("/proc")? {
