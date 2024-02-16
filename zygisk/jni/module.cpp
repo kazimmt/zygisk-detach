@@ -17,11 +17,10 @@ using zygisk::ServerSpecializeArgs;
 
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "zygisk-detach", __VA_ARGS__)
 
-#define DETACH_CAP 512
-static unsigned char DETACH_TXT[DETACH_CAP] = {0};
+static unsigned char* DETACH_TXT;
 static uint8_t HEADERS_COUNT;
 
-void handle_transact(uint8_t* data, size_t data_size) {
+static inline void handle_transact(uint8_t* data, size_t data_size) {
     auto p = FakeParcel{data, 0};
     if (!p.enforceInterface(data_size, HEADERS_COUNT)) return;
     uint32_t pkg_len = p.readInt32();
@@ -64,7 +63,7 @@ class Sigringe : public zygisk::ModuleBase {
 
     void preAppSpecialize(AppSpecializeArgs* args) override {
         const char* process = env->GetStringUTFChars(args->nice_name, nullptr);
-        if (memcmp(process, "com.android.vending", 19)) {
+        if (memcmp(process, "com.android.vending\0", 20)) {
             env->ReleaseStringUTFChars(args->nice_name, process);
             api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
             return;
@@ -96,7 +95,7 @@ class Sigringe : public zygisk::ModuleBase {
             this->api->pltHookRegister(dev, inode, "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j",
                                        (void**)&transact_hook, (void**)&transact_orig);
             if (this->api->pltHookCommit()) {
-                // LOGD("Loaded!");
+                LOGD("Loaded!");
             } else {
                 LOGD("ERROR: pltHookCommit");
                 api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
@@ -139,19 +138,18 @@ class Sigringe : public zygisk::ModuleBase {
         if (size <= 0) {
             LOGD("ERROR: detach.bin <= 0");
             return 0;
-        } else if (size > DETACH_CAP - 1) {  // -1 because of the null terminator
-            LOGD("ERROR: detach.bin > %d", DETACH_CAP - 1);
+        }
+        DETACH_TXT = (unsigned char*)malloc(size + 1);
+        auto r = read(fd, DETACH_TXT, size);
+        if (r < 0) {
+            LOGD("ERROR: read companion");
             return 0;
         }
-        int received = 0;
-        while (received < size) {
-            auto red = read(fd, DETACH_TXT + received, size - received);
-            if (red < 0) {
-                LOGD("ERROR: read companion");
-                return 0;
-            }
-            received += red;
+        if (r != size) {
+            LOGD("ERROR: read companion not whole");
+            return 0;
         }
+        DETACH_TXT[size] = 0;
         return (size_t)size;
     }
 };
