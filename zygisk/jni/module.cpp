@@ -11,28 +11,33 @@
 #include "parcel.hpp"
 #include "zygisk.hpp"
 
-using zygisk::Api;
-using zygisk::AppSpecializeArgs;
-using zygisk::ServerSpecializeArgs;
-
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "zygisk-detach", __VA_ARGS__)
 
-static unsigned char* DETACH_TXT;
-static uint8_t HEADERS_COUNT;
+static uint8_t* DETACH_TXT;
+static uint8_t HEADERS_LEN;
 
-static inline void handle_transact(uint8_t* data, size_t data_size) {
-    auto p = FakeParcel{data, 0};
-    if (!p.enforceInterface(data_size, HEADERS_COUNT)) return;
+struct PParcel {
+    size_t error;
+    uint8_t* data;
+    size_t data_size;
+};
+
+static inline void detach(PParcel* parcel, uint32_t code) {
+    auto p = FakeParcel{parcel->data, 0};
+    if (!p.enforceInterface(parcel->data_size, HEADERS_LEN)) return;
     uint32_t pkg_len = p.readInt32();
     uint32_t pkg_len_b = pkg_len * 2 - 1;
+    if (pkg_len_b > UINT8_MAX) return;
+    if (code == getPackageInfo_code) return;
     auto pkg_ptr = p.readString16(pkg_len);
 
     size_t i = 0;
     uint8_t dlen;
     while ((dlen = DETACH_TXT[i])) {
-        unsigned char* dptr = DETACH_TXT + i + sizeof(dlen);
+        uint8_t* dptr = DETACH_TXT + i + sizeof(dlen);
         i += sizeof(dlen) + dlen;
-        if (dlen != pkg_len_b) continue;
+        if (dlen != pkg_len_b)
+            continue;
         if (!memcmp(dptr, pkg_ptr, dlen)) {
             *pkg_ptr = 0;
             return;
@@ -42,28 +47,28 @@ static inline void handle_transact(uint8_t* data, size_t data_size) {
 
 int (*transact_orig)(void*, int32_t, uint32_t, void*, void*, uint32_t);
 
-struct PParcel {
-    size_t error;
-    uint8_t* data;
-    size_t data_size;
-};
-
 int transact_hook(void* self, int32_t handle, uint32_t code, void* pdata, void* preply, uint32_t flags) {
     auto parcel = (PParcel*)pdata;
-    handle_transact(parcel->data, parcel->data_size);
+    detach(parcel, code);
     return transact_orig(self, handle, code, pdata, preply, flags);
 }
 
-class Sigringe : public zygisk::ModuleBase {
-   public:
-    void onLoad(Api* api, JNIEnv* env) override {
+class ZygiskDetach : public zygisk::ModuleBase {
+public:
+    void onLoad(zygisk::Api* api, JNIEnv* env) override {
         this->api = api;
         this->env = env;
     }
 
-    void preAppSpecialize(AppSpecializeArgs* args) override {
+    void preServerSpecialize(zygisk::ServerSpecializeArgs* args) override {
+        (void)args;
+        api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+    }
+
+    void preAppSpecialize(zygisk::AppSpecializeArgs* args) override {
         const char* process = env->GetStringUTFChars(args->nice_name, nullptr);
-        if (memcmp(process, "com.android.vending\0", 20)) {
+#define vending "com.android.vending"
+        if (memcmp(process, vending, STR_LEN(vending))) {
             env->ReleaseStringUTFChars(args->nice_name, process);
             api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
             return;
@@ -81,12 +86,12 @@ class Sigringe : public zygisk::ModuleBase {
         char sdk_str[2];
         if (__system_property_get("ro.build.version.sdk", sdk_str)) {
             int sdk = atoi(sdk_str);
-            if (sdk >= 30) HEADERS_COUNT = 3;
-            else if (sdk == 29) HEADERS_COUNT = 2;
-            else HEADERS_COUNT = 1;
+            if (sdk >= 30) HEADERS_LEN = 3 * sizeof(uint32_t);
+            else if (sdk == 29) HEADERS_LEN = 2 * sizeof(uint32_t);
+            else HEADERS_LEN = 1 * sizeof(uint32_t);
         } else {
             LOGD("WARN: could not get sdk version (fallback=3)");
-            HEADERS_COUNT = 3;
+            HEADERS_LEN = 3 * sizeof(uint32_t);
         }
 
         ino_t inode;
@@ -106,8 +111,8 @@ class Sigringe : public zygisk::ModuleBase {
         }
     }
 
-   private:
-    Api* api;
+private:
+    zygisk::Api* api;
     JNIEnv* env;
 
     bool getBinder(ino_t* inode, dev_t* dev) {
@@ -119,7 +124,8 @@ class Sigringe : public zygisk::ModuleBase {
             unsigned int dev_major, dev_minor;
             int cur;
             sscanf(mapbuf, "%*s %s %*x %x:%x %lu %*s%n", flags, &dev_major, &dev_minor, inode, &cur);
-            if (memcmp(&mapbuf[cur - 12], "libbinder.so", 12) == 0 && flags[2] == 'x') {
+#define libbinder "libbinder.so"
+            if (memcmp(&mapbuf[cur - STR_LEN(libbinder)], libbinder, STR_LEN(libbinder)) == 0 && flags[2] == 'x') {
                 *dev = makedev(dev_major, dev_minor);
                 fclose(fp);
                 return true;
@@ -139,7 +145,7 @@ class Sigringe : public zygisk::ModuleBase {
             LOGD("ERROR: detach.bin <= 0");
             return 0;
         }
-        DETACH_TXT = (unsigned char*)malloc(size + 1);
+        DETACH_TXT = (uint8_t*)malloc(size + 1);
         auto r = read(fd, DETACH_TXT, size);
         if (r < 0) {
             LOGD("ERROR: read companion");
@@ -185,5 +191,5 @@ static void companion_handler(int remote_fd) {
     close(fd);
 }
 
-REGISTER_ZYGISK_MODULE(Sigringe)
+REGISTER_ZYGISK_MODULE(ZygiskDetach)
 REGISTER_ZYGISK_COMPANION(companion_handler)

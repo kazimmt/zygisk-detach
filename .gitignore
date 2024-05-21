@@ -17,5 +17,6 @@ local.properties
 b.sh
 test*
 magisk/system/bin/*
-fast-memmem
 *.log
+zygisk-rust
+aidl/*.aidl*
