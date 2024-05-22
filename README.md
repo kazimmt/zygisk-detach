@@ -10,7 +10,7 @@ Hooks libbinder with zygisk
 * Flash zygisk-detach module
 * Reboot
 * Run the cli in termux: `su -c detach`  
-  or use [zygisk-detach-app](https://github.com/j-hc/zygisk-detach-app) if you dont wanna use the terminal  
+  or use [zygisk-detach-app](https://github.com/j-hc/zygisk-detach-app/releases/latest/download/app-release.apk) if you don't wanna use the terminal  
   or use the WebUI if you are on KernelSU
 * Select apps you wish to detach. Changes are applied immediately, no need to reboot.
 
